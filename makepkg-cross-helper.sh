@@ -62,6 +62,7 @@
 #
 # Usage: Add the line `source /path/to/makepkg-cross-helper.sh' at the end of
 #        your PKGBUILD file.
+###############################################################################
 
 declare -A crosshelper
 
@@ -123,16 +124,15 @@ crosshelper[PKG_PREFIX]=arm-linux-gnueabihf
 # End of optional variables
 
 ###############################################################################
+# Get environment variables that we care about from makepkg arguments
+###############################################################################
+for envvar in {ARCH,PKG_PREFIX,BIN_PREFIX,CC,CXX,LD}; do
+  crosshelper[${envvar}]=${!envvar}
+done
+
+###############################################################################
 # Process arguments, should all be VAR=VALUE
 ###############################################################################
-#for ((i=0; i<$#; i++)); do
-#  crosshelper[temp]=$(eval "echo \$$i")
-#  if [ "${crosshelper[temp]/=/}" != "${crosshelper[temp]}" ]; then
-#    crosshelper[envvar]=${temp%%=*}
-#    crosshelper[value]=${temp#*=}
-#  fi
-#  unset crosshelper[temp];
-#done
 
 while [ $# -gt 0 ]; do
   crosshelper[envvar]=${1%%=*}
@@ -166,7 +166,7 @@ setup_env()
   if [ "x${crosshelper[guess_prefix]}" == "x" ] && [ "${crosshelper[PKG_PREFIX]}" != "${crosshelper[BIN_PREFIX]}" ]; then
     #Didn't get a guess from the environment variables, try crosshelper[BIN_PREFIX]-{cc,c++,gcc,g++,clang,clang++}?
     for bin in {cc,c++,gcc,g++,clang,clang++}; do
-      guessfile=$(which "${crosshelper[BIN_PREFIX]}-$bin" 2>/dev/null)
+      guessfile=$(which "${crosshelper[BIN_PREFIX]}-$bin" 2>/dev/null || /bin/true)
       if [ "x$guessfile" != "x" ]; then
         crosshelper[guess_prefix]=${crosshelper[BIN_PREFIX]}
         break
@@ -176,7 +176,7 @@ setup_env()
   if [ "x${crosshelper[guess_prefix]}" == "x" ]; then
     #Still nothing? Try package prefix? I'm out of ideas here.
     for bin in {cc,c++,gcc,g++,clang,clang++}; do
-      guessfile=$(which "${crosshelper[PKG_PREFIX]}-$bin" 2>/dev/null)
+      guessfile=$(which "${crosshelper[PKG_PREFIX]}-$bin" 2>/dev/null || /bin/true)
       if [ "x$guessfile" != "x" ]; then
         crosshelper[guess_prefix]=${crosshelper[PKG_PREFIX]}
         break
@@ -194,9 +194,10 @@ setup_env()
           if [ "x${crosshelper[guess_prefix]}" != "x" ]; then
             #We were able to find a binary prefix in any of the usual envvars
             #(CC, CXX, LD, AR, NM, RANLIB)
-            if [ "${envtobin[$i]}" == "CC" ] && [ ! -x "$(which ${crosshelper[guess_prefix]}-cc 2>/dev/null)" ]; then
-              if [ -x "$(which ${crosshelper[guess_prefix]}-gcc 2>/dev/null)" ]; then
+            if [ "${envtobin[$i]}" == "CC" ] && [ ! -x "$(which ${crosshelper[guess_prefix]}-cc 2>/dev/null || /bin/true)" ]; then
+              if [ -x "$(which ${crosshelper[guess_prefix]}-gcc 2>/dev/null || /bin/true)" ]; then
                 #Default to gcc
+                echo crosshelper[${envtobin[$i]}]=${crosshelper[guess_prefix]}-gcc
                 crosshelper[${envtobin[$i]}]=${crosshelper[guess_prefix]}-gcc
               fi
             else
@@ -207,7 +208,7 @@ setup_env()
             echo "If this isn't correct, set it explictly in the script or pass it as"
             echo "an argument to the sourcing of the script."
           else
-            #No CROSSHELPER_${ENVVAR} set, no CROSSHELPER_BIN_PREFIX and we
+            #No crosshelper[$envvar] set, no crosshelper[BIN_PREFIX] and we
             #weren't able to find a prefixed binary in any of the usual candidate
             #environment variables. I give up; I can only make this so easy.
             echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
@@ -217,11 +218,43 @@ setup_env()
             return 1
           fi
         else
-          echo "cross-helper: Warning: Using ${envtobin[$i]}=${crosshelper[BIN_PREFIX]}-${envtobin[$(($i + 1))]}"
+          foundbin=""
+          #We want to make sure that the compiler actually exists. In my installation, arm-linux-gnueabihf-cc
+          #does not exist.
+          if [ ! -x "$(which "${crosshelper[BIN_PREFIX]}-${envtobin[$(($i + 1))]}" 2>/dev/null || echo "this-is-a-dummy")" ]; then
+            #Try to find crosshelper[BIN_PREFIX]-{gcc,clang} or crosshelper[BIN_PREFIX]-{g++,clang++}
+            declare -A binmap=([CC]="gcc clang" [CXX]="g++ clang++")
+            for bin in ${binmap[${envtobin[$i]}]}; do
+              trybin="$(which "${crosshelper[BIN_PREFIX]}-${bin}" 2>/dev/null || echo "this-is-a-dummy")"
+              if [ -x "$trybin" ]; then
+                foundbin="${trybin}"
+                break
+              fi
+            done
+            unset binmap[@]
+          else
+            foundbin="$(which "${crosshelper[BIN_PREFIX]}-${envtobin[$(($i + 1))]}")"
+          fi
+          if [ "x${foundbin}" == "x" ]; then
+            echo "cross-helper: ERROR: Could not find a compiler for ${envtobin[$i]} with prefix"
+            echo "                     ${crosshelper[BIN_PREFIX]}."
+            declare -A binmap=([CC]="gcc clang" [CXX]="g++ clang++")
+            echo "              Tried: "
+            for bin in ${binmap[${envtobin[$i]}]}; do
+              echo "                     ${crosshelper[BIN_PREFIX]}-${bin}"
+            done
+            unset binmap[@]
+            echo "              Maybe try setting it explicitly via"
+            echo "              1) source makepkg-cross-helper.sh [...] CC=[compiler]"
+            echo "              2) makepkg [...] CC=[compiler]"
+            echo "              3) Setting crossprefix[CC] in makepkg-cross-helper.sh"
+            return 1;
+          fi
+          echo "cross-helper: Warning: Using ${foundbin}"
           echo "              If this is not correct, set the ${envtobin[$i]} environment variable, set"
           echo "              crosshelper[\"BIN_PREFIX\"] in the script, or use:"
           echo "              source /path/to/makepkg-cross-helper.sh ${envtobin[$i]}=value"
-          crosshelper[${envtobin[$i]}]=${crosshelper[BIN_PREFIX]}-${envtobin[$(($i + 1))]}
+          crosshelper[${envtobin[$i]}]=${foundbin}
         fi
       fi
     fi
@@ -266,12 +299,10 @@ create_dummy_path()
 $(which ${crosshelper[$envvar]}) $flags "\$@"
 EOF
       chmod +x "${srcdir}/dummy-bin/${binname}"
-      #ln -s "$(which ${crosshelper[$envvar]})" ${srcdir}/dummy-bin/${binname}
       if [ "$envvar" == "CC" ]; then
         #Create scripts for gcc/cc/clang
         if [ ! -e "${srcdir}/dummy-bin/cc" ]; then
           if [ -x "${crosshelper[CC]%-*}-cc" ]; then
-            #ln -s "${crosshelper[$envvar]%-*}-cc" ${srcdir}/dummy-bin/cc
             cat <<EOF >"${srcdir}/dummy-bin/cc"
 #!/bin/bash
 $(which ${crosshelper[CC]}) $flags "\$@"
@@ -279,7 +310,6 @@ EOF
             chmod +x "${srcdir}/dummy-bin/cc"
           else
             #Link cc to $CC
-            #ln -s "$(which ${crosshelper[$envvar]})" ${srcdir}/dummy-bin/cc
             cat <<EOF >"${srcdir}/dummy-bin/cc"
 #!/bin/bash
 $(which ${crosshelper[CC]}) $flags "\$@"
@@ -472,13 +502,13 @@ if [ ${#original_pkgname[@]} -gt 1 ]; then
   #functions for package_${new-packagename}() that point to the original
   #packinging functions
   for i in ${!original_pkgname[@]}; do
-    eval "package_${crosshelper[PKG_PREFIX]}-${original_pkgname[$i]}() { declare -A crosshelper; load_settings; setup_env; package_${original_pkgname[$i]}; fix_overrides; }"
+    eval "package_${crosshelper[PKG_PREFIX]}-${original_pkgname[$i]}() { declare -A crosshelper; load_settings; setup_env; export crosshelper; package_${original_pkgname[$i]}; fix_overrides; }"
   done
 else
   #Rename package() to original_package()
   eval "$(echo "original_package()"; declare -f package | tail -n +2)"
   #Add a call to fix_overrides (see below)
-  eval "package(){ declare -A crosshelper; load_settings; setup_env; original_package; fix_overrides; }"
+  eval "package(){ declare -A crosshelper; load_settings; setup_env; export crosshelper; original_package; fix_overrides; }"
 fi
 
 ##############################################################################
@@ -519,6 +549,7 @@ check()
   declare -A crosshelper
   load_settings
   setup_env
+  export crosshelper
   PATH="${srcdir}/dummy-bin:$PATH" original_check
   ret=$?
   return $ret
@@ -535,6 +566,7 @@ build()
   #We're going to create a dummy path, but leave it until makepkg is done
   #packaging.
   create_dummy_path
+  export crosshelper
   # Call the original build function
   PATH="${srcdir}/dummy-bin:$PATH" original_build
   #Don't remove the dummy path just yet. We want to make sure tidy_install can
@@ -584,6 +616,10 @@ if [ ${#pkgname[@]} -gt 0 ]; then
   eval "$(echo "original_run_split_packaging()"; declare -f run_split_packaging | tail -n +2)"
 run_split_packaging()
 {
+  declare -A crosshelper
+  load_settings
+  setup_env
+  export crosshelper
   original_run_split_packaging
   remove_dummy_path
 }
@@ -591,6 +627,10 @@ else
   eval "$(echo "original_run_single_packaging()"; declare -f run_single_packaging | tail -n +2)"
 run_single_packaging()
 {
+  declare -A crosshelper
+  load_settings
+  setup_env
+  export crosshelper
   original_run_single_packaging
   remove_dummy_path
 }
