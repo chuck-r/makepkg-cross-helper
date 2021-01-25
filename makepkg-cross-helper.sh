@@ -124,10 +124,13 @@ crosshelper[PKG_PREFIX]=arm-linux-gnueabihf
 # End of optional variables
 
 ###############################################################################
-# Get environment variables that we care about from makepkg arguments
+# Get environment variables that we care about from makepkg
+# arguments/environment
 ###############################################################################
-for envvar in {ARCH,PKG_PREFIX,BIN_PREFIX,CC,CXX,LD}; do
-  crosshelper[${envvar}]=${!envvar}
+for envvar in {ARCH,PKG_PREFIX,BIN_PREFIX,CC,CXX,LD,CFLAGS,CXXFLAGS,LDFLAGS,CONFIG}; do
+  if [ "x${!envvar}" != "x" ]; then
+    crosshelper[${envvar}]=${!envvar}
+  fi
 done
 
 ###############################################################################
@@ -138,6 +141,56 @@ while [ $# -gt 0 ]; do
   crosshelper[envvar]=${1%%=*}
   crosshelper[value]=${1#*=}
   crosshelper[${crosshelper[envvar]}]=${crosshelper[value]}
+  if [ "x${crosshelper[CONFIG]}" != "x" ]; then
+    #Config file set as argument to source
+    if [ -e "${crosshelper[CONFIG]}" ]; then
+      # Prefix all variables from the config file as MAKEPKG_CONFIG_
+      # The awk script just prints all lines with MAKEPKG_CONFIG and then
+      # compacts all multi-line arrays into a single line
+      config=$(cat "${crosshelper[CONFIG]}" | sed -r 's|^(\w+)?([A-z_]([0-9A-z_]+)?)=|MAKEPKG_CONFIG_\1\2=|' | \
+                awk 'BEGIN{openparen=0;};/MAKEPKG_CONFIG/{test=$0;if(sub("\\(","",test) && !sub("\\)","", test)){openparen=1;};if(!openparen){print $0;};};openparen == 1{test=$0;if(sub("\\)","",test)){openparen=0; print $0}else{printf("%s", $0);};}')
+      # `source` without a file`
+      eval $config
+      # `env` won't find the variables imported above. Good thing we saved them.
+      # Read all imported vars
+      echo "$config" | while read -d$'\n' envvar; do
+        local env=${envvar%%=*}
+        local val=${envvar#*=}
+        # Skip arrays, since BASH doesn't support multi-dimensional arrays...
+        # and I don't think that any of them are particularly helpful
+        # The array variables in a makepkg.conf are:
+        # DLAGENTS
+        # VCSCLIENTS
+        # INTEGRITY_CHECKS
+        # MAN_DIRS
+        # DOC_DIRS
+        # PURGE_TARGETS
+        # COMPRESS{GZ,BZ2,XZ,ZST,LRZ,LZO,Z,LZ4,LZ}
+        # PKGEXT
+        # SRCEXT
+        if [ "${val#(}" != "$val" ]; then
+          continue
+        fi
+        env=${env#MAKEPKG_CONFIG_}
+        # In the case that CONFIG= is given as an argument to `source', we will
+        # go ahead and let the variables from the CONFIG file clobber
+        # already-set variables. This is because `makepkg' will set stuff like
+        # LDFLAGS, CFLAGS, CXXFLAGS from the usual config file. This likely
+        # won't work for cross-compiling. However, there is a ramification to
+        # this: Anything passed as a makepkg argument (i.e. makepkg
+        # CC=arm-linux-gnueabihf-gcc) that also appears in the CONFIG *will*
+        # get clobbered. There's just no good way to discern what's intended
+        # and what's automatic.
+        #
+        # So, for best practice, always put CONFIG= as the first argument to
+        # `source`, otherwise it may clobber variables set before CONFIG=
+        eval crosshelper[$env]=$val
+      done
+    else
+      echo "cross-helper: ERROR: CONFIG=${crosshelper[value]} passed as an argument, but it doesn't appear to be a file."
+      continue
+    fi
+  fi
   shift
 done
 
@@ -400,7 +453,7 @@ fix_overrides()
 {
   #arch, groups, depends, optdepends, provides, conflicts, replaces, backup
   #Fix arch() to include our arch (if it doesn't already)
-  if [ "${arch[*]/${crosshelper[ARCH]}/}" == "${arch[*]}" ]; then
+  if [ "${arch[*]}/any/" == "${arch[*]}" ] && [ "${arch[*]/${crosshelper[ARCH]}/}" == "${arch[*]}" ]; then
     arch[${#arch[@]}]=${crosshelper[ARCH]}
   fi
 
@@ -524,7 +577,7 @@ echo "Done."
 ###############################################################################
 
 echo -n "cross-helper: Adding architecture... "
-if [ "${arch[@]/${crosshelper[ARCH]}/}" == "${arch[@]}" ]; then
+if [ "${arch[@]/any}" == "${arch[@]}" ] && [ "${arch[@]/${crosshelper[ARCH]}/}" == "${arch[@]}" ]; then
   arch[${#arch[@]}]=${crosshelper[ARCH]}
 fi
 echo "Done."
