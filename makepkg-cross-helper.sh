@@ -127,7 +127,7 @@ crosshelper[PKG_PREFIX]=arm-linux-gnueabihf
 # Get environment variables that we care about from makepkg
 # arguments/environment
 ###############################################################################
-for envvar in {ARCH,PKG_PREFIX,BIN_PREFIX,CC,CXX,LD,CFLAGS,CXXFLAGS,LDFLAGS,CONFIG}; do
+for envvar in {ARCH,PKG_PREFIX,BIN_PREFIX,CC,CXX,CFLAGS,CXXFLAGS,LDFLAGS,CONFIG}; do
   if [ "x${!envvar}" != "x" ]; then
     crosshelper[${envvar}]=${!envvar}
   fi
@@ -142,20 +142,25 @@ while [ $# -gt 0 ]; do
   crosshelper[value]=${1#*=}
   crosshelper[${crosshelper[envvar]}]=${crosshelper[value]}
   if [ "x${crosshelper[CONFIG]}" != "x" ]; then
-    #Config file set as argument to source
+    crosshelper[originalconfig]=$(cat /etc/makepkg.conf)
+    #Config file set as argument to `source`
     if [ -e "${crosshelper[CONFIG]}" ]; then
       # Prefix all variables from the config file as MAKEPKG_CONFIG_
       # The awk script just prints all lines with MAKEPKG_CONFIG and then
       # compacts all multi-line arrays into a single line
-      config=$(cat "${crosshelper[CONFIG]}" | sed -r 's|^(\w+)?([A-z_]([0-9A-z_]+)?)=|MAKEPKG_CONFIG_\1\2=|' | \
-                awk 'BEGIN{openparen=0;};/MAKEPKG_CONFIG/{test=$0;if(sub("\\(","",test) && !sub("\\)","", test)){openparen=1;};if(!openparen){print $0;};};openparen == 1{test=$0;if(sub("\\)","",test)){openparen=0; print $0}else{printf("%s", $0);};}')
+      crosshelper[config]=$(cat "${crosshelper[CONFIG]}" | sed -r 's|^(\w+)?([A-z_]([0-9A-z_]+)?)=|MAKEPKG_CONFIG_\1\2=|' | \
+                awk 'BEGIN{openparen=0;};/MAKEPKG_CONFIG_/{test=$0;if(sub("\\(","",test) && !sub("\\)","", test)){openparen=1;};if(!openparen){print $0;};};openparen == 1{test=$0;if(sub("\\)","",test)){openparen=0; print $0}else{printf("%s", $0);};}' | \
+                sed 's/MAKEPKG_CONFIG_//')
       # `source` without a file`
-      eval $config
+      eval ${crosshelper[config]}
       # `env` won't find the variables imported above. Good thing we saved them.
       # Read all imported vars
-      echo "$config" | while read -d$'\n' envvar; do
-        local env=${envvar%%=*}
-        local val=${envvar#*=}
+      crosshelper[debug]=0
+      while read -d$'\n' envvar; do
+        crosshelper[newenv]=${envvar%%=*}
+        crosshelper[newval]=${envvar#*=}
+        #Remove quotes for matching
+        crosshelper[newvalstripped]="$(echo ${crosshelper[newval]} | sed -r -e 's/^("|'\'')//' -e 's/("|'\'')$//')"
         # Skip arrays, since BASH doesn't support multi-dimensional arrays...
         # and I don't think that any of them are particularly helpful
         # The array variables in a makepkg.conf are:
@@ -168,24 +173,52 @@ while [ $# -gt 0 ]; do
         # COMPRESS{GZ,BZ2,XZ,ZST,LRZ,LZO,Z,LZ4,LZ}
         # PKGEXT
         # SRCEXT
-        if [ "${val#(}" != "$val" ]; then
+        if [ "${crosshelper[newval]#(}" != "${crosshelper[newval]}" ]; then
+          # I do need to know if the passed config specifies default debugging
+          # so that I can update CFLAGS/CXXFLAGS/LDFLAGS accordingly.
+          if [ "${crosshelper[newenv]}" == "OPTIONS" ]; then
+            eval CROSSHELPER_OPTIONS=${crosshelper[newval]}
+            for option in ${CROSSHELPER_OPTIONS[@]}; do
+              if [ "$option" == "debug" ]; then
+                debug=1;
+                crosshelper[DEBUG]=1;
+                break
+              fi
+            done
+            unset CROSSHELPER_OPTIONS[@]
+          fi
           continue
         fi
-        env=${env#MAKEPKG_CONFIG_}
-        # In the case that CONFIG= is given as an argument to `source', we will
-        # go ahead and let the variables from the CONFIG file clobber
-        # already-set variables. This is because `makepkg' will set stuff like
-        # LDFLAGS, CFLAGS, CXXFLAGS from the usual config file. This likely
-        # won't work for cross-compiling. However, there is a ramification to
-        # this: Anything passed as a makepkg argument (i.e. makepkg
-        # CC=arm-linux-gnueabihf-gcc) that also appears in the CONFIG *will*
-        # get clobbered. There's just no good way to discern what's intended
-        # and what's automatic.
-        #
-        # So, for best practice, always put CONFIG= as the first argument to
-        # `source`, otherwise it may clobber variables set before CONFIG=
-        eval crosshelper[$env]=$val
-      done
+        if [ "x${crosshelper[${crosshelper[newenv]}]}" != "x" ]; then
+          # The environment variable is already defined. Let's see if it's the
+          # same value as what's stored in /etc/makepkg.conf. If it is, it's
+          # safe to override it. Otherwise, it was probably explicitly set.
+          crosshelper[originalval]=$(echo "${crosshelper[originalconfig]}" | grep "^${crosshelper[newenv]}=" | sed -r -e 's/[[:digit:]]?[[:alnum:]_]+=//' -e 's/^"//' -e 's/"$//')
+          if [ "${crosshelper[${crosshelper[newenv]}]}" == "${crosshelper[originalval]}" ]; then
+            # I have a bit of a unique situation with my alternate config file:
+            # I use variable substitution in order to type a long path once and
+            # use it multiple times. So, I have to eval the values to make sure
+            # that the values get expanded. This is also the reason for the
+            # export below it -- the config file uses plain names, not the
+            # crosshelper array. The export doesn't hurt anything since makepkg
+            # cleasr the environment after this script is run anyway (as far as
+            # I can tell)
+            crosshelper[${crosshelper[newenv]}]="$(eval echo ${crosshelper[newvalstripped]})"
+            eval "export ${crosshelper[newenv]}=\"${crosshelper[newvalstripped]}\""
+          fi
+          unset crosshelper[originalval]
+        else
+          # The environment variable isn't defined yet, go ahead and set it.
+          crosshelper[${crosshelper[newenv]}]="$(eval echo ${crosshelper[newvalstripped]})"
+          eval "export ${crosshelper[newenv]}=\"${crosshelper[newvalstripped]}\""
+        fi
+      done <<<$(echo "${crosshelper[config]}") #Avoid a subshell
+      unset crosshelper[config]
+      unset crosshelper[newenv]
+      unset crosshelper[newval]
+      unset crosshelper[newvalstripped]
+      unset crosshelper[debug]
+      unset crosshelper[originalconfig]
     else
       echo "cross-helper: ERROR: CONFIG=${crosshelper[value]} passed as an argument, but it doesn't appear to be a file."
       continue
@@ -193,9 +226,31 @@ while [ $# -gt 0 ]; do
   fi
   shift
 done
-
 unset crosshelper[envvar]
 unset crosshelper[value]
+
+###############################################################################
+# Replicate `makepkg` and append debug flags
+###############################################################################
+if [ "x${crosshelper[DEBUG]}" == "" ]; then
+  # I already checked for debugging if an external config was passed, but I
+  # haven't yet checked the options array.
+  for val in ${options[@]}; do
+    if [ "$val" == "debug" ]; then
+      crosshelper[DEBUG]=1
+      break
+    fi
+  done
+fi
+# After potentially two checks now, if we are debugging, make sure to append
+# debug flags
+if [ "x${crosshelper[DEBUG]}" != "x" ]; then
+  for var in {DEBUG_CFLAGS,DEBUG_CXXFLAGS,DEBUG_LDFLAGS}; do
+    if [ "x${crosshelper[$var]}" != "x" ]; then
+      eval "crosshelper[${var#DEBUG_}]+=\" ${crosshelper[$var]}\""
+    fi
+  done
+fi
 
 ###############################################################################
 #Try to set the needed variables to sane defults
@@ -237,16 +292,17 @@ setup_env()
     done
   fi
 
-  declare -a envtobin=("CC" "cc" "CXX" "c++")
+  declare -a envtobin=("CC" "cc" "CXX" "c++" "LD" "ld")
   for i in ${!envtobin[@]}; do
     if [ $(($i % 2)) -eq 0 ]; then
       if [ "x${crosshelper[${envtobin[$i]}]}" == "x" ]; then
-        #crosshelper{$envtobin[$i]} doesn't exist
+        # crosshelper{$envtobin[$i]} (crosshelper[CC],crosshelper[CXX],
+        # crosshelper[LD]) doesn't exist
         if [ "x${crosshelper[BIN_PREFIX]}" == "x" ]; then
-          #crosshelper[BIN_PREFIX] isn't set
+          # crosshelper[BIN_PREFIX] isn't set
           if [ "x${crosshelper[guess_prefix]}" != "x" ]; then
-            #We were able to find a binary prefix in any of the usual envvars
-            #(CC, CXX, LD, AR, NM, RANLIB)
+            # I was able to find a binary prefix in any of the usual envvars
+            # (CC, CXX, LD)
             if [ "${envtobin[$i]}" == "CC" ] && [ ! -x "$(which ${crosshelper[guess_prefix]}-cc 2>/dev/null || /bin/true)" ]; then
               if [ -x "$(which ${crosshelper[guess_prefix]}-gcc 2>/dev/null || /bin/true)" ]; then
                 #Default to gcc
@@ -261,9 +317,9 @@ setup_env()
             echo "If this isn't correct, set it explictly in the script or pass it as"
             echo "an argument to the sourcing of the script."
           else
-            #No crosshelper[$envvar] set, no crosshelper[BIN_PREFIX] and we
-            #weren't able to find a prefixed binary in any of the usual candidate
-            #environment variables. I give up; I can only make this so easy.
+            # No crosshelper[$envvar] set, no crosshelper[BIN_PREFIX] and I
+            # wasn't able to find a prefixed binary in any of the usual candidate
+            # environment variables. I give up; I can only make this so easy.
             echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
             echo "!! cross-helper: Can't assume a sane default for ${envtobin[$i]}"
             echo "!!               Maybe set crosshelper[\"BIN_PREFIX\"] in the script?"
@@ -272,10 +328,10 @@ setup_env()
           fi
         else
           foundbin=""
-          #We want to make sure that the compiler actually exists. In my installation, arm-linux-gnueabihf-cc
-          #does not exist.
+          # We want to make sure that the compiler actually exists. In my installation, arm-linux-gnueabihf-cc
+          # does not exist.
           if [ ! -x "$(which "${crosshelper[BIN_PREFIX]}-${envtobin[$(($i + 1))]}" 2>/dev/null || echo "this-is-a-dummy")" ]; then
-            #Try to find crosshelper[BIN_PREFIX]-{gcc,clang} or crosshelper[BIN_PREFIX]-{g++,clang++}
+            # Try to find crosshelper[BIN_PREFIX]-{gcc,clang} or crosshelper[BIN_PREFIX]-{g++,clang++}
             declare -A binmap=([CC]="gcc clang" [CXX]="g++ clang++")
             for bin in ${binmap[${envtobin[$i]}]}; do
               trybin="$(which "${crosshelper[BIN_PREFIX]}-${bin}" 2>/dev/null || echo "this-is-a-dummy")"
@@ -347,11 +403,14 @@ create_dummy_path()
       else
         flags=${crosshelper[${envvar}FLAGS]}
       fi
-      cat <<EOF >"${srcdir}/dummy-bin/${binname}"
+      if [ "x${binname}" != "x" ]; then
+        #It's possible for binname to be blank
+        cat <<EOF >"${srcdir}/dummy-bin/${binname}"
 #!/bin/bash
 $(which ${crosshelper[$envvar]}) $flags "\$@"
 EOF
-      chmod +x "${srcdir}/dummy-bin/${binname}"
+        chmod +x "${srcdir}/dummy-bin/${binname}"
+      fi
       if [ "$envvar" == "CC" ]; then
         #Create scripts for gcc/cc/clang
         if [ ! -e "${srcdir}/dummy-bin/cc" ]; then
@@ -404,7 +463,7 @@ EOF
             #Link CXX to c++
             cat <<EOF >"${srcdir}/dummy-bin/c++"
 #!/bin/bash
-$(which ${crosshelper[CXX]}) $flags "$@"
+$(which ${crosshelper[CXX]}) $flags "\$@"
 EOF
             chmod +x "${srcdir}/dummy-bin/c++"
           fi
@@ -413,7 +472,7 @@ EOF
           if [ -x "${crosshelper[CXX]%-*}-g++" ]; then
             cat <<EOF >"${srcdir}/dummy-bin/g++"
 #!/bin/bash
-$(which ${crosshelper[CXX]%-*}-g++) $flags "$@"
+$(which ${crosshelper[CXX]%-*}-g++) $flags "\$@"
 EOF
             chmod +x "${srcdir}/dummy-bin/g++"
           fi
@@ -422,9 +481,35 @@ EOF
           if [ -x "${crosshelper[CXX]%-*}-clang++" ]; then
             cat <<EOF >"${srcdir}/dummy-bin/clang++"
 #!/bin/bash
-$(which ${crosshelper[CXX]%-*}-clang++) $flags "$@"
+$(which ${crosshelper[CXX]%-*}-clang++) $flags "\$@"
 EOF
             chmod +x "${srcdir}/dummy-bin/clang++"
+          fi
+        fi
+      elif [ "$envvar" == "LD" ]; then
+        if [ ! -e "${srcdir}/dummy-bin/ld" ]; then
+          if [ -x "${crosshelper[LD]%-*}-ld" ]; then
+            cat <<EOF >"${srcdir}/dummy-bin/ld"
+#!/bin/bash
+$(which ${crosshelper[LD]%-*}-ld) $flags "\$@"
+EOF
+            chmod +x "${srcdir}/dummy-bin/ld"
+          else
+            #Link crosshelper[LD] to ld
+            cat <<EOF >"${srcdir}/dummy-bin/ld"
+#!/bin/bash
+$(which ${crosshelper[LD]}) $flags "\$@"
+EOF
+            chmod +x "${srcdir}/dummy-bin/ld"
+          fi
+        fi
+        if [ ! -e "${srcdir}/dummy-bin/lld" ]; then
+          if [ -x "${crosshelper[LD]%-*}-lld" ]; then
+            cat <<EOF >"${srcdir}/dummy-bin/lld"
+#!/bin/bash
+$(which ${crosshelper[LD]%-*}-lld) $flags "\$@"
+EOF
+            chmod +x "${srcdir}/dummy-bin/lld"
           fi
         fi
       fi
@@ -634,17 +719,14 @@ echo "Done."
 # So, this function stores the initial computed values of various crosshelper
 # variables so that they can be easily re-loaded later.
 ###############################################################################
+settingslist=""
+for key in ${!crosshelper[@]}; do
+  settingslist+="crosshelper[$key]=\"${crosshelper[$key]}\""$'\n'
+done
 eval "$(cat <<EOF
 load_settings()
 {
-  crosshelper[ARCH]="${crosshelper[ARCH]}"
-  crosshelper[PKG_PREFIX]="${crosshelper[PKG_PREFIX]}"
-  crosshelper[BIN_PREFIX]="${crosshelper[BIN_PREFIX]}"
-  crosshelper[CC]="${crosshelper[CC]}"
-  crosshelper[CXX]="${crosshelper[CXX]}"
-  crosshelper[CFLAGS]='${crosshelper[CFLAGS]}'
-  crosshelper[CXXFLAGS]='${crosshelper[CXXFLAGS]}'
-  crosshelper[LDFLAGS]='${crosshelper[LDFLAGS]}'
+  $settingslist
 }
 EOF
 )"
