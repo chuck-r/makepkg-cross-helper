@@ -142,7 +142,7 @@ while [ $# -gt 0 ]; do
   crosshelper[value]=${1#*=}
   crosshelper[${crosshelper[envvar]}]=${crosshelper[value]}
   if [ "x${crosshelper[CONFIG]}" != "x" ]; then
-    crosshelper[originalconfig]=$(cat /etc/makepkg.conf)
+    crosshelper[originalconfig]=$(cat ${MAKEPKG_CONF:-/etc/makepkg.conf})
     #Config file set as argument to `source`
     if [ -e "${crosshelper[CONFIG]}" ]; then
       # Prefix all variables from the config file as MAKEPKG_CONFIG_
