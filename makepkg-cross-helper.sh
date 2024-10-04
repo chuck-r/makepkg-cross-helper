@@ -120,6 +120,7 @@ crosshelper[PKG_PREFIX]=arm-linux-gnueabihf
 #crosshelper[CC]=arm-linux-gnueabihf-gcc
 #crosshelper[CXX]=arm-linux-gnueabihf-g++
 #crosshelper[LD]=arm-linux-gnueabihf-ld
+#crosshelper[fakepath]=0
 
 # End of optional variables
 
@@ -127,7 +128,7 @@ crosshelper[PKG_PREFIX]=arm-linux-gnueabihf
 # Get environment variables that we care about from makepkg
 # arguments/environment
 ###############################################################################
-for envvar in {ARCH,PKG_PREFIX,BIN_PREFIX,CC,CXX,CFLAGS,CXXFLAGS,LDFLAGS,CONFIG}; do
+for envvar in {ARCH,PKG_PREFIX,BIN_PREFIX,CC,CXX,CFLAGS,CXXFLAGS,LDFLAGS,PATH,fakepath,CONFIG}; do
   if [ "x${!envvar}" != "x" ]; then
     crosshelper[${envvar}]=${!envvar}
   fi
@@ -201,7 +202,7 @@ while [ $# -gt 0 ]; do
             # that the values get expanded. This is also the reason for the
             # export below it -- the config file uses plain names, not the
             # crosshelper array. The export doesn't hurt anything since makepkg
-            # cleasr the environment after this script is run anyway (as far as
+            # clears the environment after this script is run anyway (as far as
             # I can tell)
             crosshelper[${crosshelper[newenv]}]="$(eval echo ${crosshelper[newvalstripped]})"
             eval "export ${crosshelper[newenv]}=\"${crosshelper[newvalstripped]}\""
@@ -516,10 +517,25 @@ EOF
     fi
   done
   for bin in /usr/${crosshelper[BIN_PREFIX]}/bin/*; do
+    if [ "$bin" == "*" ]; then
+      break
+    fi
     shortbin="$(basename $bin)"
     if [ ! -e "${srcdir}/dummy-bin/${shortbin}" ]; then
       ln -s "$bin" "${srcdir}/dummy-bin/${shortbin}"
     fi
+  done
+  
+  #Copy binutils
+  local binutils=(addr2line ar as c++filt dwp elfedit gprof
+                  ld ld.bfd ld.gold nm objcopy objdump ranlib
+                  readelf size strings strip)
+  for bin in ${binutils[@]}; do
+    binloc="$(which $crosshelper[BIN_PREFIX]-$bin 2>/dev/null || true)"
+    if [ "x$binloc" == "x" ]; then
+      continue
+    fi
+    ln -s "$binloc" "${srcdir}/dummy-bin/${binloc##*-}"
   done
 }
 
@@ -545,9 +561,9 @@ fix_overrides()
   add_prefixes groups depends optdepends provides conflicts replaces
 
   #Fix backup array to point to ${CROSSHELPER_PREFIX}/[backup]
-  for i in ${!backup[@]}; do
-    backup[$i]=${crosshelper[PKG_PREFIX]}/${backup[$i]}
-  done
+  #for i in ${!backup[@]}; do
+  #  backup[$i]=${crosshelper[PKG_PREFIX]}/${backup[$i]}
+  #done
 }
 
 ###############################################################################
@@ -638,7 +654,7 @@ echo -n "cross-helper: Configuring package names... "
 if [ ${#original_pkgname[@]} -gt 1 ]; then
   #If there is more than one package in $pkgname, then we have to add
   #functions for package_${new-packagename}() that point to the original
-  #packinging functions
+  #packaging functions
   for i in ${!original_pkgname[@]}; do
     eval "package_${crosshelper[PKG_PREFIX]}-${original_pkgname[$i]}() { declare -A crosshelper; load_settings; setup_env; export crosshelper; package_${original_pkgname[$i]}; fix_overrides; }"
   done
@@ -676,12 +692,12 @@ echo -n "cross-helper: Hooking check() and build()..."
 
 #Credit to Evan Broder @ StackOverflow
 #https://stackoverflow.com/questions/1203583/how-do-i-rename-a-bash-function/1369211#1369211
+#https://web.archive.org/web/20151109012144/https://stackoverflow.com/questions/1203583/how-do-i-rename-a-bash-function/1369211#1369211
 
 #Rename build() to original_build()
-eval "$(echo "original_build()"; declare -f build | tail -n +2)"
-
-eval "$(echo "original_check()"; declare -f check | tail -n +2)"
-
+#Some packages such as "filesystem" don't have build() or check()
+if [ "x$(declare -f check)" != "x" ]; then
+  eval "$(echo "original_check()"; declare -f check | tail -n +2)"
 check()
 {
   declare -A crosshelper
@@ -692,10 +708,14 @@ check()
   ret=$?
   return $ret
 }
+fi
 
-#Define a new build() function that sets aliases for 'cc', 'gcc', 'ld', 'ar',
-#and 'ranlib' to their cross-compiling counterparts, call original_build()
-#and then unset the aliases.
+if [ "x$(declare -f build)" != "x" ]; then
+  eval "$(echo "original_build()"; declare -f build | tail -n +2)"
+
+  #Define a new build() function that sets aliases for 'cc', 'gcc', 'ld', 'ar',
+  #and 'ranlib' to their cross-compiling counterparts, call original_build()
+  #and then unset the aliases.
 build()
 {
   declare -A crosshelper
@@ -703,7 +723,9 @@ build()
   setup_env
   #We're going to create a dummy path, but leave it until makepkg is done
   #packaging.
-  create_dummy_path
+  if [ "x${crosshelper[fakepath]}" != "x" ] && [ "${crosshelper[fakepath]}" == "1" ]; then
+    create_dummy_path
+  fi
   export crosshelper
   # Call the original build function
   PATH="${srcdir}/dummy-bin:$PATH" original_build
@@ -712,6 +734,7 @@ build()
   ret=$?
   return $ret
 }
+fi
 echo "Done."
 
 ###############################################################################
@@ -740,7 +763,7 @@ EOF
 eval "$(echo "original_tidy_install()"; declare -f tidy_install | tail -n +2)"
 tidy_install()
 {
-  PATH=${srcdir}/dummy-bin:$PATH original_tidy_install
+  PATH="${srcdir}/dummy-bin:$PATH" original_tidy_install
 }
 
 ###############################################################################
@@ -756,7 +779,9 @@ run_split_packaging()
   setup_env
   export crosshelper
   original_run_split_packaging
-  remove_dummy_path
+  if [ "x${crosshelper[fakepath]}" != "x" ] && [ "${crosshelper[fakepath]}" == "1" ]; then
+    remove_dummy_path
+  fi
 }
 else
   eval "$(echo "original_run_single_packaging()"; declare -f run_single_packaging | tail -n +2)"
@@ -767,6 +792,8 @@ run_single_packaging()
   setup_env
   export crosshelper
   original_run_single_packaging
-  remove_dummy_path
+  if [ "x${crosshelper[fakepath]}" != "x" ] && [ "${crosshelper[fakepath]}" == "1" ]; then
+    remove_dummy_path
+  fi
 }
 fi

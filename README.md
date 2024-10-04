@@ -50,7 +50,7 @@ For fine-tuning the script, have a look in the `Optional variables` section of t
 There are a few ways to pass arguments to the script. From the highest precedence to the lowest, they are:
 1. `makepkg` arguments: `makepkg CC=arm-linux-gnueabihf`
 2. `source` arguments within the PKGBUILD file: `source /path/to/makepkg-cross-helper.sh CC=arm-linux-gnueabihf`
-3. Alternative makepkg.conf file within the PKGBUILD file: `source /path/to/makepkg-cross-helper.sh CONFIG=/path/to/makepkg.conf`
+3. Alternative makepkg.conf file within the PKGBUILD file: `source /path/to/makepkg-cross-helper.sh CONFIG=/path/to/makepkg.conf`; this is mainly just as an alternative to specifying one on the pkgbuild command line (which, without this option, you will have to when cross-compiling) and should act the same in most respects.
 
 This is important to remember, since variables can overwrite each other. For example, if your alternate makepkg.conf file with CFLAGS="configflags" is sourced via `source /path/to/makepkg-cross-helper.sh CONFIG=myaltconfig.conf`, but you also specified `makepkg CFLAGS="cmdflags"`, then, due to order of precedence, ultimately `CFLAGS="cmdflags"`.
 
